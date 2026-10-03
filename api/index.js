@@ -1,8 +1,19 @@
 const cheerio = require("cheerio");
 
-const SOURCE_URL =
-  process.env.SOURCE_URL ||
-  "https://www.1tamilmv.capital/index.php?/forums/forum/11-web-hd-itunes-hd-bluray/";
+// Each source becomes its own catalog row in Stremio.
+// To add another row, add another object here (id must be unique, no spaces).
+const SOURCES = [
+  {
+    id: "tamilmv-webhd",
+    name: "TamilMV - Latest WebHD",
+    url: "https://www.1tamilmv.capital/index.php?/forums/forum/11-web-hd-itunes-hd-bluray/&sortby=last_post&sortdirection=desc",
+  },
+  {
+    id: "tamilmv-hollywood",
+    name: "TamilMV - Hollywood Multi Audio",
+    url: "https://www.1tamilmv.capital/index.php?/forums/forum/17-hollywood-movies-in-multi-audios/&sortby=last_post&sortdirection=desc",
+  },
+];
 
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
@@ -17,7 +28,7 @@ const manifest = {
   resources: ["catalog"],
   types: ["movie"],
   idPrefixes: ["tt"],
-  catalogs: [{ type: "movie", id: "tamilmv-webhd", name: "TamilMV - Latest WebHD" }],
+  catalogs: SOURCES.map((s) => ({ type: "movie", id: s.id, name: s.name })),
   behaviorHints: { configurable: false },
 };
 
@@ -62,8 +73,8 @@ async function resolveImdb({ title, year }) {
   return meta;
 }
 
-async function scrapeTopics() {
-  const r = await fetch(SOURCE_URL, { headers: { "User-Agent": UA, Accept: "text/html" } });
+async function scrapeTopics(url) {
+  const r = await fetch(url, { headers: { "User-Agent": UA, Accept: "text/html" } });
   if (!r.ok) throw new Error(`Source returned HTTP ${r.status}`);
   const $ = cheerio.load(await r.text());
 
@@ -82,13 +93,14 @@ async function scrapeTopics() {
   return out;
 }
 
-let catalogCache = { at: 0, metas: null };
+const catalogCache = {}; // per-source cache
 const TTL_MS = 15 * 60 * 1000;
 
-async function buildCatalog() {
-  if (catalogCache.metas && Date.now() - catalogCache.at < TTL_MS) return catalogCache.metas;
+async function buildCatalog(source) {
+  const cached = catalogCache[source.id];
+  if (cached && Date.now() - cached.at < TTL_MS) return cached.metas;
 
-  const topics = await scrapeTopics();
+  const topics = await scrapeTopics(source.url);
   const results = await Promise.all(topics.map(resolveImdb));
 
   const seen = new Set();
@@ -105,7 +117,7 @@ async function buildCatalog() {
       releaseInfo: m.releaseInfo || String(m.year || ""),
     });
   }
-  if (metas.length) catalogCache = { at: Date.now(), metas };
+  if (metas.length) catalogCache[source.id] = { at: Date.now(), metas };
   return metas;
 }
 
@@ -123,10 +135,13 @@ module.exports = async (req, res) => {
       res.setHeader("Cache-Control", "public, max-age=3600");
       return res.status(200).send(JSON.stringify(manifest));
     }
-    if (route === "catalog" && req.query.id === "tamilmv-webhd") {
-      const metas = await buildCatalog();
-      res.setHeader("Cache-Control", "public, s-maxage=900, stale-while-revalidate=3600");
-      return res.status(200).send(JSON.stringify({ metas }));
+    if (route === "catalog") {
+      const source = SOURCES.find((x) => x.id === req.query.id);
+      if (source) {
+        const metas = await buildCatalog(source);
+        res.setHeader("Cache-Control", "public, s-maxage=900, stale-while-revalidate=3600");
+        return res.status(200).send(JSON.stringify({ metas }));
+      }
     }
     return res.status(404).send(JSON.stringify({ error: "Not found" }));
   } catch (e) {
